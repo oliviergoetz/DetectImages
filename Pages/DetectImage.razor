@@ -8,12 +8,20 @@
 
 <h3>Comparer 2 images</h3>
 
-<InputFile OnChange="OnInputFile1" />
-<InputFile OnChange="OnInputFile2" />
+<div style="text-align: left; margin-top: 10px;">
+    <InputFile OnChange="OnInputFile1" />
+    <InputFile OnChange="OnInputFile2" />
+    <button disabled="@(!CanCompare || isProcessing)" @onclick="CompareImages">
+        Comparer
+        @if (isProcessing)
+        {
+            <span class="spinner"></span>
+        }
+    </button>
+</div>
 
 <div style="display: flex; gap: 20px; align-items: flex-start;">
     <div style="text-align: center;">
-        <div><strong>Image 1</strong></div>
         <p>@img1Error</p>
         @if (img1Preview != null)
         {
@@ -22,39 +30,34 @@
     </div>
 
     <div style="text-align: center;">
-        <div><strong>Image 2</strong></div>
         <p>@img2Error</p>
         @if (img2Preview != null)
         {
             <img src="@img2Preview" width="200" style="border: 1px solid #ccc; border-radius: 5px;" />
         }
     </div>
-
-    <div style="text-align: center;">
-        <button @onclick="CompareImages" disabled="@(!CanCompare)">Comparer</button>
-    </div>
-</div>
-
-@if (similarity.HasValue)
-{
-    <div style="text-align: center; margin-top: 20px;">
-        <p>
-            <b>Similarité :</b> 
-            <span style="color:@GetSimilarityColor(similarity.Value)">
-                @similarity.Value.ToString("0.00") %
-            </span>
-        </p>
-        <div style="width: 200px; height: 20px; border: 1px solid #ccc; border-radius: 5px; margin: 0 auto; background: #eee;">
-            <div style="height: 100%; border-radius: 5px; background:@GetSimilarityColor(similarity.Value); width:@similarity.Value%"></div>
+    @if (similarity.HasValue)
+    {
+        <div style="text-align: center; margin-top: 20px;">
+            <p>
+                <b>Similarité :</b> 
+                <span style="color:@GetSimilarityColor(similarity.Value)">
+                    @similarity.Value.ToString("0.00") %
+                </span>
+            </p>
+            <div style="width: 200px; height: 20px; border: 1px solid #ccc; border-radius: 5px; margin: 0 auto; background: #eee;">
+                <div style="height: 100%; border-radius: 5px; background:@GetSimilarityColor(similarity.Value); width:@similarity.Value%"></div>
+            </div>
         </div>
-    </div>
-}
+    }
+</div>
 
 @code {
     private IBrowserFile file1, file2;
     private string? img1Preview, img2Preview;
     private string? img1Error, img2Error;
     private float? similarity;
+    private bool isProcessing = false;
 
     private bool CanCompare => file1 != null && file2 != null && string.IsNullOrEmpty(img1Error) && string.IsNullOrEmpty(img2Error);
 
@@ -62,6 +65,7 @@
     {
         try
         {
+            similarity = null;
             img1Error = null;
             file1 = e.File;
             img1Preview = await ConvertToBase64Async(file1);
@@ -77,6 +81,7 @@
         try
         {
             img2Error = null;
+            similarity = null;
             file2 = e.File;
             img2Preview = await ConvertToBase64Async(file2);
         }
@@ -88,10 +93,21 @@
 
     private async Task CompareImages()
     {
-        var tempFile1 = await SaveBrowserFile(file1);
-        var tempFile2 = await SaveBrowserFile(file2);
+        try
+        {
+            isProcessing = true;   // Active le loader
+            StateHasChanged();     // Rafraîchit l'UI
 
-        similarity = CompareImagesWithOnnx(tempFile1, tempFile2);
+            var tempFile1 = await SaveBrowserFile(file1);
+            var tempFile2 = await SaveBrowserFile(file2);
+
+            similarity = CompareImagesWithOnnx(tempFile1, tempFile2);
+        }
+        finally
+        {
+            isProcessing = false;  // Cache le loader
+            StateHasChanged();     // Rafraîchit l'UI
+        }
     }
 
     private async Task<string> SaveBrowserFile(IBrowserFile file)
@@ -113,25 +129,39 @@
 
     private DenseTensor<float> PreprocessImage(string imagePath)
     {
+        // 🔹 1. Charger l'image en mémoire au format RGB (3 canaux)
+        // Ici on force le type Rgb24 (8 bits par canal) → plus simple pour normaliser ensuite.
         using var image = Image.Load<Rgb24>(imagePath);
+
+        // 🔹 2. Redimensionner l'image en 224x224 pixels (taille attendue par CLIP ViT-B/32)
         image.Mutate(x => x.Resize(224, 224));
 
+        // 🔹 3. Créer le tenseur de sortie au format attendu par ONNX : [batch, channels, height, width]
+        // Ici batch = 1, channels = 3 (R,G,B), height = 224, width = 224
         var tensor = new DenseTensor<float>(new[] { 1, 3, 224, 224 });
 
+        // 🔹 4. Moyenne et écart-type spécifiques au modèle CLIP
+        // Elles servent à normaliser les pixels de l'image
         float[] mean = { 0.48145466f, 0.4578275f, 0.40821073f };
         float[] std = { 0.26862954f, 0.26130258f, 0.27577711f };
 
+        // 🔹 5. Remplir le tenseur avec les pixels normalisés
         for (int y = 0; y < 224; y++)
         {
             for (int x = 0; x < 224; x++)
             {
-                var p = image[x, y];
-                tensor[0, 0, y, x] = (p.R / 255f - mean[0]) / std[0];
-                tensor[0, 1, y, x] = (p.G / 255f - mean[1]) / std[1];
-                tensor[0, 2, y, x] = (p.B / 255f - mean[2]) / std[2];
+                // Récupérer le pixel à la position (x,y)
+                var pixel = image[x, y];
+
+                // Normaliser chaque canal :
+                //   (valeur/255 - moyenne) / écart-type
+                tensor[0, 0, y, x] = (pixel.R / 255f - mean[0]) / std[0]; // Rouge
+                tensor[0, 1, y, x] = (pixel.G / 255f - mean[1]) / std[1]; // Vert
+                tensor[0, 2, y, x] = (pixel.B / 255f - mean[2]) / std[2]; // Bleu
             }
         }
 
+        // 🔹 6. Retourner le tenseur prêt à être donné au modèle ONNX
         return tensor;
     }
 
@@ -160,6 +190,20 @@
         var inputIds = new DenseTensor<long>(new int[] { 1, 77 });
         var attentionMask = new DenseTensor<long>(new int[] { 1, 77 });
 
+#if DEBUG
+    foreach (var input in session.InputMetadata)
+            Console.WriteLine($"{input.Key}: {input.Value.ElementType} {string.Join(",", input.Value.Dimensions)}");
+// input_ids: System.Int64 -1,-1
+// pixel_values: System.Single -1,-1,-1,-1
+// attention_mask: System.Int64 -1,-1
+
+        foreach (var output in session.OutputMetadata)
+            Console.WriteLine(output.Key);
+// logits_per_image
+// logits_per_text
+// text_embeds
+// image_embeds
+#endif
 
         var inputs1 = new List<NamedOnnxValue>
         {
@@ -178,9 +222,14 @@
         float[] embedding1;
         float[] embedding2;
 
+        // Demande au modèle de donner son vecteur de représentation (embedding) de l’image.
+        // Cet embedding est un vecteur de 512 flottants (dimension dépendante du modèle CLIP).
         using (var results1 = session.Run(inputs1))
         {
-            embedding1 = results1.First(x => x.Name == "image_embeds").AsTensor<float>().ToArray();
+            embedding1 = results1
+                .First(x => x.Name == "image_embeds")   // 🔹 sélectionne la sortie du modèle qui s'appelle "image_embeds"
+                .AsTensor<float>()                      // 🔹 convertit en tenseur de float
+                .ToArray();                             // 🔹 aplati en tableau C# float[]
         }
 
         using (var results2 = session.Run(inputs2))
@@ -199,3 +248,27 @@
         return "#2ecc71";                      // vert
     }
 }
+
+<style>
+    .spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #3498db;
+        border-radius: 50%;
+        width: 24px;
+        height: 24px;
+        animation: spin 1s linear infinite;
+        display: inline-block;
+        vertical-align: middle;
+        margin-left: 8px;
+    }
+
+    @@keyframes spin {
+        0% {
+            transform: rotate(0deg);
+        }
+
+        100% {
+            transform: rotate(360deg);
+        }
+    }
+</style>
