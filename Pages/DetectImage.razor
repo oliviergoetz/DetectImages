@@ -1,14 +1,8 @@
 @page "/detectimage"
-@using Microsoft.ML
-@using Microsoft.ML.Data
 @using Microsoft.ML.OnnxRuntime
 @using Microsoft.ML.OnnxRuntime.Tensors
-@using Microsoft.ML.Transforms.Onnx
-@using System.IO;
-@using Microsoft.AspNetCore.Components.Forms
-@using SixLabors.ImageSharp;
-@using SixLabors.ImageSharp.PixelFormats;
-@using SixLabors.ImageSharp.Formats.Png;
+@using SixLabors.ImageSharp
+@using SixLabors.ImageSharp.PixelFormats
 @using SixLabors.ImageSharp.Processing
 @inject IWebHostEnvironment Env
 
@@ -37,16 +31,22 @@
     </div>
 
     <div style="text-align: center;">
-        <button @onclick="CompareImagesWithOnnx" disabled="@(!CanCompare)">Comparer</button>
+        <button @onclick="CompareImages" disabled="@(!CanCompare)">Comparer</button>
     </div>
 </div>
 
-
-
 @if (similarity.HasValue)
 {
-    <div style="text-align: center;">
-        <p><b>Similarité : @similarity.Value.ToString("0.00") %</b></p>
+    <div style="text-align: center; margin-top: 20px;">
+        <p>
+            <b>Similarité :</b> 
+            <span style="color:@GetSimilarityColor(similarity.Value)">
+                @similarity.Value.ToString("0.00") %
+            </span>
+        </p>
+        <div style="width: 200px; height: 20px; border: 1px solid #ccc; border-radius: 5px; margin: 0 auto; background: #eee;">
+            <div style="height: 100%; border-radius: 5px; background:@GetSimilarityColor(similarity.Value); width:@similarity.Value%"></div>
+        </div>
     </div>
 }
 
@@ -58,7 +58,6 @@
 
     private bool CanCompare => file1 != null && file2 != null && string.IsNullOrEmpty(img1Error) && string.IsNullOrEmpty(img2Error);
 
-
     private async Task OnInputFile1(InputFileChangeEventArgs e)
     {
         try
@@ -69,7 +68,7 @@
         }
         catch (Exception ex)
         {
-            img1Error = $"{ex.Message}";
+            img1Error = ex.Message;
         }
     }
 
@@ -83,7 +82,7 @@
         }
         catch (Exception ex)
         {
-            img2Error = $"{ex.Message}";
+            img2Error = ex.Message;
         }
     }
 
@@ -92,88 +91,26 @@
         var tempFile1 = await SaveBrowserFile(file1);
         var tempFile2 = await SaveBrowserFile(file2);
 
-        var mlContext = new MLContext();
-
-        // Charger le modèle ONNX
-        var pipeline = mlContext.Transforms
-                        .LoadImages(outputColumnName: "input", imageFolder: "", inputColumnName: nameof(ImageInput.Image))
-                        .Append(mlContext.Transforms.ResizeImages("input", 224, 224))
-                        .Append(mlContext.Transforms.ExtractPixels(
-                            outputColumnName: "image_tensor", // correspond au nom attendu par le modèle
-                            inputColumnName: "input"))
-                        .Append(mlContext.Transforms.ApplyOnnxModel(
-                            modelFile: Path.Combine(Env.WebRootPath, "models/MobileNet-v2.onnx"),
-                            outputColumnNames: new[] { "class_logits" },
-                            inputColumnNames: new[] { "image_tensor" }));
-
-        var model = pipeline.Fit(mlContext.Data.LoadFromEnumerable(new List<ImageInput>()));
-
-        // Convertir les images en float[] via ML.NET
-        var engine = mlContext.Model.CreatePredictionEngine<ImageInput, ImageOutput>(model);
-
-        var img1Data = new ImageInput { Image = tempFile1 };
-        var img2Data = new ImageInput { Image = tempFile2 };
-
-        var feat1 = engine.Predict(img1Data).Output;
-        var feat2 = engine.Predict(img2Data).Output;
-
-        similarity = CosineSimilarity(feat1, feat2) * 100;
+        similarity = CompareImagesWithOnnx(tempFile1, tempFile2);
     }
 
     private async Task<string> SaveBrowserFile(IBrowserFile file)
     {
-        var tempPath = Path.Combine(Path.GetTempPath(), file.Name); // nom du fichier temporaire
+        var tempPath = Path.Combine(Path.GetTempPath(), file.Name);
         using var fs = File.Create(tempPath);
         await file.OpenReadStream().CopyToAsync(fs);
         return tempPath;
     }
 
-    public class ImageInput
-    {
-        public string Image { get; set; } = null!;
-    }
-
-    public class ImageOutput
-    {
-        [ColumnName("class_logits")]
-        public float[] Output { get; set; } = null!;
-    }
-
-
-    private float CosineSimilarity(float[] a, float[] b)
-    {
-        float dot = 0;
-        float magA = 0;
-        float magB = 0;
-        for (int i = 0; i < a.Length; i++)
-        {
-            dot += a[i] * b[i];
-            magA += a[i] * a[i];
-            magB += b[i] * b[i];
-        }
-        return dot / ((float)Math.Sqrt(magA) * (float)Math.Sqrt(magB));
-    }
-
     private async Task<string> ConvertToBase64Async(IBrowserFile file)
     {
-        try
-        {
-            using var stream = file.OpenReadStream(maxAllowedSize: 10_000_000);
-            using var image = await Image.LoadAsync<Rgba32>(stream);
-
-            using var ms = new MemoryStream();
-            await image.SaveAsync(ms, new PngEncoder());
-
-            return $"data:image/png;base64,{Convert.ToBase64String(ms.ToArray())}";
-        }
-        catch (Exception ex)
-        {
-            throw new Exception(ex.Message);
-        }
+        using var stream = file.OpenReadStream(maxAllowedSize: 10_000_000);
+        using var image = await Image.LoadAsync<Rgba32>(stream);
+        using var ms = new MemoryStream();
+        await image.SaveAsPngAsync(ms);
+        return $"data:image/png;base64,{Convert.ToBase64String(ms.ToArray())}";
     }
 
-
-    ////////////////////
     private DenseTensor<float> PreprocessImage(string imagePath)
     {
         using var image = Image.Load<Rgb24>(imagePath);
@@ -198,11 +135,20 @@
         return tensor;
     }
 
-    private async Task CompareImagesWithOnnx()
+    private float CosineSimilarity(float[] a, float[] b)
     {
-        var file1Path = await SaveBrowserFile(file1);
-        var file2Path = await SaveBrowserFile(file2);
+        float dot = 0, magA = 0, magB = 0;
+        for (int i = 0; i < a.Length; i++)
+        {
+            dot += a[i] * b[i];
+            magA += a[i] * a[i];
+            magB += b[i] * b[i];
+        }
+        return dot / ((float)Math.Sqrt(magA) * (float)Math.Sqrt(magB));
+    }
 
+    private float CompareImagesWithOnnx(string file1Path, string file2Path)
+    {
         string modelPath = Path.Combine(Env.WebRootPath, "models/openai.clip-vit-base-patch32.onnx");
 
         using var session = new InferenceSession(modelPath);
@@ -210,15 +156,46 @@
         var tensor1 = PreprocessImage(file1Path);
         var tensor2 = PreprocessImage(file2Path);
 
-        var inputs1 = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("pixel_values", tensor1) };
-        var inputs2 = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("pixel_values", tensor2) };
+        // Placeholders texte (seq_len = 77 pour CLIP)
+        var inputIds = new DenseTensor<long>(new int[] { 1, 77 });
+        var attentionMask = new DenseTensor<long>(new int[] { 1, 77 });
 
-        using var results1 = session.Run(inputs1);
-        using var results2 = session.Run(inputs2);
 
-        var logits1 = results1.First().AsEnumerable<float>().ToArray();
-        var logits2 = results2.First().AsEnumerable<float>().ToArray();
+        var inputs1 = new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("pixel_values", tensor1),
+            NamedOnnxValue.CreateFromTensor("input_ids", inputIds),
+            NamedOnnxValue.CreateFromTensor("attention_mask", attentionMask)
+        };
 
-        similarity = CosineSimilarity(logits1, logits2) * 100;
+        var inputs2 = new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("pixel_values", tensor2),
+            NamedOnnxValue.CreateFromTensor("input_ids", inputIds),
+            NamedOnnxValue.CreateFromTensor("attention_mask", attentionMask)
+        };
+
+        float[] embedding1;
+        float[] embedding2;
+
+        using (var results1 = session.Run(inputs1))
+        {
+            embedding1 = results1.First(x => x.Name == "image_embeds").AsTensor<float>().ToArray();
+        }
+
+        using (var results2 = session.Run(inputs2))
+        {
+            embedding2 = results2.First(x => x.Name == "image_embeds").AsTensor<float>().ToArray();
+        }
+
+        return CosineSimilarity(embedding1, embedding2) * 100;
+    }
+
+    private string GetSimilarityColor(float value)
+    {
+        // Simple gradient: rouge (<50%), orange (50-80%), vert (>80%)
+        if (value < 50) return "#e74c3c";      // rouge
+        if (value < 80) return "#f39c12";      // orange
+        return "#2ecc71";                      // vert
     }
 }
