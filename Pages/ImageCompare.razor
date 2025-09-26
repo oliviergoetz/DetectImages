@@ -9,16 +9,29 @@
 <InputFile OnChange="OnInputFile1" />
 <InputFile OnChange="OnInputFile2" />
 
-@if (img1Preview != null)
-{
-    <img src="@img1Preview" width="200" />
-}
-@if (img2Preview != null)
-{
-    <img src="@img2Preview" width="200" />
-}
+<div style="display: flex; gap: 20px; align-items: flex-start;">
+    <div style="text-align: center;">
+        <div><strong>Image 1</strong></div>
+        <p>@img1Error</p>
+        @if (img1Preview != null)
+        {
+            <img src="@img1Preview" width="200" style="border: 1px solid #ccc; border-radius: 5px;" />
+        }
+    </div>
 
-<button @onclick="CompareImages" disabled="@(!CanCompare)">Comparer</button>
+    <div style="text-align: center;">
+        <div><strong>Image 2</strong></div>
+        <p>@img2Error</p>
+        @if (img2Preview != null)
+        {
+            <img src="@img2Preview" width="200" style="border: 1px solid #ccc; border-radius: 5px;" />
+        }
+    </div>
+
+    <button @onclick="CompareImages" disabled="@(!CanCompare)">Comparer</button>
+</div>
+
+
 
 @if (similarity.HasValue)
 {
@@ -28,26 +41,43 @@
 @code {
     private IBrowserFile file1, file2;
     private string? img1Preview, img2Preview;
+    private string? img1Error, img2Error;
     private float? similarity;
 
-    private bool CanCompare => file1 != null && file2 != null;
+    private bool CanCompare => file1 != null && file2 != null && string.IsNullOrEmpty(img1Error) && string.IsNullOrEmpty(img2Error);
 
-    private void OnInputFile1(InputFileChangeEventArgs e)
+    private async Task OnInputFile1(InputFileChangeEventArgs e)
     {
-        file1 = e.File;
-        using var stream = file1.OpenReadStream();
-        var buffer = new byte[file1.Size];
-        stream.Read(buffer, 0, buffer.Length);
-        img1Preview = $"data:{file1.ContentType};base64,{Convert.ToBase64String(buffer)}";
+        try
+        {
+            img1Error = "";
+            file1 = e.File;
+            var buffer = new byte[file1.Size];
+            using var stream = file1.OpenReadStream(maxAllowedSize: 5_000_000); // 5 Mo max
+            await stream.ReadAsync(buffer, 0, (int)file1.Size);
+            img1Preview = $"data:{file1.ContentType};base64,{Convert.ToBase64String(buffer)}";
+        }
+        catch (Exception ex)
+        {
+            img1Error = $"{ex.Message}";
+        }
     }
 
-    private void OnInputFile2(InputFileChangeEventArgs e)
+    private async Task OnInputFile2(InputFileChangeEventArgs e)
     {
-        file2 = e.File;
-        using var stream = file2.OpenReadStream();
-        var buffer = new byte[file2.Size];
-        stream.Read(buffer, 0, buffer.Length);
-        img2Preview = $"data:{file2.ContentType};base64,{Convert.ToBase64String(buffer)}";
+        try
+        {
+            img2Error = "";
+            file2 = e.File;
+            var buffer = new byte[file2.Size];
+            using var stream = file2.OpenReadStream(maxAllowedSize: 5_000_000); // 5 Mo max
+            await stream.ReadAsync(buffer, 0, (int)file2.Size);
+            img2Preview = $"data:{file2.ContentType};base64,{Convert.ToBase64String(buffer)}";
+        }
+        catch (Exception ex)
+        {
+            img2Error = $"{ex.Message}";
+        }
     }
 
     private void CompareImages()
