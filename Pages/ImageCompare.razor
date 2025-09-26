@@ -2,6 +2,11 @@
 @using Microsoft.ML
 @using Microsoft.ML.Data
 @using Microsoft.ML.Transforms.Onnx
+@using System.IO;
+@using Microsoft.AspNetCore.Components.Forms
+@using SixLabors.ImageSharp;
+@using SixLabors.ImageSharp.PixelFormats;
+@using SixLabors.ImageSharp.Formats.Png;
 @inject IWebHostEnvironment Env
 
 <h3>Comparer deux images</h3>
@@ -46,16 +51,14 @@
 
     private bool CanCompare => file1 != null && file2 != null && string.IsNullOrEmpty(img1Error) && string.IsNullOrEmpty(img2Error);
 
+
     private async Task OnInputFile1(InputFileChangeEventArgs e)
     {
         try
         {
-            img1Error = "";
+            img1Error = null;
             file1 = e.File;
-            var buffer = new byte[file1.Size];
-            using var stream = file1.OpenReadStream(maxAllowedSize: 5_000_000); // 5 Mo max
-            await stream.ReadAsync(buffer, 0, (int)file1.Size);
-            img1Preview = $"data:{file1.ContentType};base64,{Convert.ToBase64String(buffer)}";
+            img1Preview = await ConvertToBase64Async(file1);
         }
         catch (Exception ex)
         {
@@ -67,12 +70,9 @@
     {
         try
         {
-            img2Error = "";
+            img2Error = null;
             file2 = e.File;
-            var buffer = new byte[file2.Size];
-            using var stream = file2.OpenReadStream(maxAllowedSize: 5_000_000); // 5 Mo max
-            await stream.ReadAsync(buffer, 0, (int)file2.Size);
-            img2Preview = $"data:{file2.ContentType};base64,{Convert.ToBase64String(buffer)}";
+            img2Preview = await ConvertToBase64Async(file2);
         }
         catch (Exception ex)
         {
@@ -138,5 +138,24 @@
     {
         [ColumnName("output")]
         public float[] Output { get; set; } = null!;
+    }
+
+
+    private async Task<string> ConvertToBase64Async(IBrowserFile file)
+    {
+        try
+        {
+            using var stream = file.OpenReadStream(maxAllowedSize: 10_000_000);
+            using var image = await Image.LoadAsync<Rgba32>(stream);
+
+            using var ms = new MemoryStream();
+            await image.SaveAsync(ms, new PngEncoder());
+
+            return $"data:image/png;base64,{Convert.ToBase64String(ms.ToArray())}";
+        }
+        catch (Exception ex)
+        {
+            throw new Exception(ex.Message);
+        }
     }
 }
